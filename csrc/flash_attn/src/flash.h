@@ -80,6 +80,9 @@ struct Flash_fwd_params : public Qkv_params {
     // If provided, the actual length of each k sequence.
     int * __restrict__ seqused_k;
 
+    // var_block_size, if definer var flash attn is used
+    int * __restrict__ var_block_size = nullptr; 
+
     int *__restrict__ blockmask;
 
     // The K_new and V_new matrices.

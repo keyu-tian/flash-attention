@@ -44,10 +44,23 @@ def _get_block_size_n(device, head_dim, is_dropout, is_causal):
 
 
 def _flash_attn_forward(
-    q, k, v, dropout_p, softmax_scale, causal, window_size, alibi_slopes, return_softmax
+    q, k, v, dropout_p, softmax_scale, causal, window_size, alibi_slopes, return_softmax, use_var = False,
 ):
     maybe_contiguous = lambda x: x.contiguous() if x.stride(-1) != 1 else x
     q, k, v = [maybe_contiguous(x) for x in (q, k, v)]
+    # Create an empty tensor for the var_block_size
+    var_block_size = torch.empty(0, dtype=torch.int32, device=q.device)
+
+    if use_var:
+        ## For test only code block
+        print("This routine called, Dummy var_block_size created")
+        # create a 1D tensor that range from 1 to seqlen_q
+        seqlen_q = q.shape[1]
+        # 1D device tensorvar_block_size
+        var_block_size = torch.arange(1, seqlen_q + 1, dtype=torch.int32, device=q.device)    
+        ## For test only code block
+        # Add your own tensor here
+
     out, q, k, v, out_padded, softmax_lse, S_dmask, rng_state = flash_attn_cuda.fwd(
         q,
         k,
@@ -61,6 +74,7 @@ def _flash_attn_forward(
         window_size[1],
         return_softmax,
         None,
+        var_block_size,
     )
     return out, q, k, v, out_padded, softmax_lse, S_dmask, rng_state
 
@@ -126,10 +140,26 @@ def _flash_attn_backward(
     alibi_slopes,
     deterministic,
     rng_state=None,
+    use_var=False,
 ):
     maybe_contiguous = lambda x: x.contiguous() if x.stride(-1) != 1 else x
     # dq, dk, dv are allocated by us so they should already be contiguous
     dout, q, k, v, out = [maybe_contiguous(x) for x in (dout, q, k, v, out)]
+    
+    #empty tensor for the var_block_size
+    var_block_size = torch.empty(0, dtype=torch.int32, device=q.device)
+
+   
+    if use_var:
+         ## For test only code block
+        print("This routine called, Dummy var_block_size created")
+        # create a 1D tensor that range from 1 to seqlen_q
+        seqlen_q = q.shape[1]
+        # 1D device tensorvar_block_size
+        var_block_size = torch.arange(1, seqlen_q + 1, dtype=torch.int32, device=q.device)    
+        ## For test only code block
+        # Add your own tensor here
+
     dq, dk, dv, softmax_d, = flash_attn_cuda.bwd(
         dout,
         q,
@@ -149,6 +179,7 @@ def _flash_attn_backward(
         deterministic,
         None,
         rng_state,
+        var_block_size,
     )
     return dq, dk, dv, softmax_d
 
@@ -505,6 +536,7 @@ class FlashAttnFunc(torch.autograd.Function):
         alibi_slopes,
         deterministic,
         return_softmax,
+        use_var=False,
     ):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
@@ -518,6 +550,7 @@ class FlashAttnFunc(torch.autograd.Function):
             window_size=window_size,
             alibi_slopes=alibi_slopes,
             return_softmax=return_softmax and dropout_p > 0,
+            use_var=use_var,
         )
         ctx.save_for_backward(q, k, v, out_padded, softmax_lse, rng_state)
         ctx.dropout_p = dropout_p
@@ -779,6 +812,7 @@ def flash_attn_func(
     alibi_slopes=None,
     deterministic=False,
     return_attn_probs=False,
+    use_var = False,
 ):
     """dropout_p should be set to 0.0 during evaluation
     Supports multi-query and grouped-query attention (MQA/GQA) by passing in KV with fewer heads
@@ -839,6 +873,7 @@ def flash_attn_func(
         alibi_slopes,
         deterministic,
         return_attn_probs,
+        use_var,
     )
 
 

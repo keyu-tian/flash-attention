@@ -1044,6 +1044,19 @@ inline __device__ void compute_attn(const Params &params) {
     // The block index for the head.
     const int bidh = blockIdx.z;
 
+    // For test only: print content of var_block_size
+    // Remove this block in production code
+    if(params.var_block_size != nullptr) {
+        if(threadIdx.x == 0) {
+            // should be a 1D vector of in, size is length of q
+            printf("var_block_size: ");
+            for(int i = 0; i < params.seqlen_q; i++) {
+                printf("%d ", params.var_block_size[i]);
+            }
+            printf(" EOL\n");
+        }
+    }
+
     // We want the fwd and bwd to generate the same dropout pattern (RNG), without restricting
     // them to have the same number of threads or have to traverse the attention matrix
     // in the same order.
@@ -1051,7 +1064,7 @@ inline __device__ void compute_attn(const Params &params) {
     // (within a warp). We use the subsequence to store the location of the 16 x 32 blocks within
     // the attention matrix. This way, as long as we have the batch, head, and the location of
     // the 16 x 32 block within the attention matrix, we can generate the exact same dropout pattern.
-
+    
     flash::compute_attn_1rowblock<Kernel_traits, Is_dropout, Is_causal, Is_local, Has_alibi, Is_even_MN, Is_even_K, Return_softmax>(params, bidb, bidh, m_block);
 }
 
