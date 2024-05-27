@@ -44,23 +44,11 @@ def _get_block_size_n(device, head_dim, is_dropout, is_causal):
 
 
 def _flash_attn_forward(
-    q, k, v, dropout_p, softmax_scale, causal, window_size, alibi_slopes, return_softmax, use_var = False,
+    q, k, v, dropout_p, softmax_scale, causal, window_size, alibi_slopes, return_softmax, VAR_visiable_kvlen
 ):
+    # VAR_visiable_kvlen: 1D torch.int32 tensor shaped in (seqlen_q,), denoting each q[i] can attend to the first VAR_visiable_kvlen[i] keys
     maybe_contiguous = lambda x: x.contiguous() if x.stride(-1) != 1 else x
     q, k, v = [maybe_contiguous(x) for x in (q, k, v)]
-    # Create an empty tensor for the var_block_size
-    var_block_size = torch.empty(0, dtype=torch.int32, device=q.device)
-
-    if use_var:
-        ## For test only code block
-        print("This routine called, Dummy var_block_size created")
-        # create a 1D tensor that range from 1 to seqlen_q
-        seqlen_q = q.shape[1]
-        # 1D device tensorvar_block_size
-        var_block_size = torch.arange(1, seqlen_q + 1, dtype=torch.int32, device=q.device)    
-        ## For test only code block
-        # Add your own tensor here
-
     out, q, k, v, out_padded, softmax_lse, S_dmask, rng_state = flash_attn_cuda.fwd(
         q,
         k,
@@ -74,7 +62,7 @@ def _flash_attn_forward(
         window_size[1],
         return_softmax,
         None,
-        var_block_size,
+        VAR_visiable_kvlen,
     )
     return out, q, k, v, out_padded, softmax_lse, S_dmask, rng_state
 
@@ -139,27 +127,13 @@ def _flash_attn_backward(
     window_size,
     alibi_slopes,
     deterministic,
+    VAR_visiable_kvlen,
     rng_state=None,
-    use_var=False,
 ):
+    # VAR_visiable_kvlen: 1D torch.int32 tensor shaped in (seqlen_q,), denoting each q[i] can attend to the first VAR_visiable_kvlen[i] keys
     maybe_contiguous = lambda x: x.contiguous() if x.stride(-1) != 1 else x
     # dq, dk, dv are allocated by us so they should already be contiguous
     dout, q, k, v, out = [maybe_contiguous(x) for x in (dout, q, k, v, out)]
-    
-    #empty tensor for the var_block_size
-    var_block_size = torch.empty(0, dtype=torch.int32, device=q.device)
-
-   
-    if use_var:
-         ## For test only code block
-        print("This routine called, Dummy var_block_size created")
-        # create a 1D tensor that range from 1 to seqlen_q
-        seqlen_q = q.shape[1]
-        # 1D device tensorvar_block_size
-        var_block_size = torch.arange(1, seqlen_q + 1, dtype=torch.int32, device=q.device)    
-        ## For test only code block
-        # Add your own tensor here
-
     dq, dk, dv, softmax_d, = flash_attn_cuda.bwd(
         dout,
         q,
@@ -177,9 +151,9 @@ def _flash_attn_backward(
         window_size[0],
         window_size[1],
         deterministic,
+        VAR_visiable_kvlen,
         None,
         rng_state,
-        var_block_size,
     )
     return dq, dk, dv, softmax_d
 
@@ -251,7 +225,9 @@ class FlashAttnQKVPackedFunc(torch.autograd.Function):
         alibi_slopes,
         deterministic,
         return_softmax,
+        VAR_visiable_kvlen,
     ):
+        # VAR_visiable_kvlen: 1D torch.int32 tensor shaped in (seqlen_q,), denoting each q[i] can attend to the first VAR_visiable_kvlen[i] keys
         if softmax_scale is None:
             softmax_scale = qkv.shape[-1] ** (-0.5)
         out, q, k, v, out_padded, softmax_lse, S_dmask, rng_state = _flash_attn_forward(
@@ -264,6 +240,7 @@ class FlashAttnQKVPackedFunc(torch.autograd.Function):
             window_size=window_size,
             alibi_slopes=alibi_slopes,
             return_softmax=return_softmax and dropout_p > 0,
+            VAR_visiable_kvlen=VAR_visiable_kvlen,
         )
         ctx.save_for_backward(q, k, v, out_padded, softmax_lse, rng_state)
         ctx.dropout_p = dropout_p
@@ -272,6 +249,7 @@ class FlashAttnQKVPackedFunc(torch.autograd.Function):
         ctx.window_size = window_size
         ctx.alibi_slopes = alibi_slopes
         ctx.deterministic = deterministic
+        ctx.VAR_visiable_kvlen = VAR_visiable_kvlen
         return out if not return_softmax else (out, softmax_lse, S_dmask)
 
     @staticmethod
@@ -295,6 +273,7 @@ class FlashAttnQKVPackedFunc(torch.autograd.Function):
             ctx.window_size,
             ctx.alibi_slopes,
             ctx.deterministic,
+            VAR_visiable_kvlen=ctx.VAR_visiable_kvlen,
             rng_state=rng_state,
         )
         dqkv = dqkv[..., : dout.shape[-1]]  # We could have padded the head dimension
@@ -388,7 +367,9 @@ class FlashAttnKVPackedFunc(torch.autograd.Function):
         alibi_slopes,
         deterministic,
         return_softmax,
+        VAR_visiable_kvlen,
     ):
+        # VAR_visiable_kvlen: 1D torch.int32 tensor shaped in (seqlen_q,), denoting each q[i] can attend to the first VAR_visiable_kvlen[i] keys
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
         out, q, k, v, out_padded, softmax_lse, S_dmask, rng_state = _flash_attn_forward(
@@ -401,6 +382,7 @@ class FlashAttnKVPackedFunc(torch.autograd.Function):
             window_size=window_size,
             alibi_slopes=alibi_slopes,
             return_softmax=return_softmax and dropout_p > 0,
+            VAR_visiable_kvlen=VAR_visiable_kvlen,
         )
         ctx.save_for_backward(q, k, v, out_padded, softmax_lse, rng_state)
         ctx.dropout_p = dropout_p
@@ -409,6 +391,7 @@ class FlashAttnKVPackedFunc(torch.autograd.Function):
         ctx.window_size = window_size
         ctx.alibi_slopes = alibi_slopes
         ctx.deterministic = deterministic
+        ctx.VAR_visiable_kvlen = VAR_visiable_kvlen
         return out if not return_softmax else (out, softmax_lse, S_dmask)
 
     @staticmethod
@@ -433,6 +416,7 @@ class FlashAttnKVPackedFunc(torch.autograd.Function):
             ctx.window_size,
             ctx.alibi_slopes,
             ctx.deterministic,
+            VAR_visiable_kvlen=ctx.VAR_visiable_kvlen,
             rng_state=rng_state,
         )
         dq = dq[..., : dout.shape[-1]]  # We could have padded the head dimension
@@ -536,8 +520,9 @@ class FlashAttnFunc(torch.autograd.Function):
         alibi_slopes,
         deterministic,
         return_softmax,
-        use_var=False,
+        VAR_visiable_kvlen,
     ):
+        # VAR_visiable_kvlen: 1D torch.int32 tensor shaped in (seqlen_q,), denoting each q[i] can attend to the first VAR_visiable_kvlen[i] keys
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
         out, q, k, v, out_padded, softmax_lse, S_dmask, rng_state = _flash_attn_forward(
@@ -550,7 +535,7 @@ class FlashAttnFunc(torch.autograd.Function):
             window_size=window_size,
             alibi_slopes=alibi_slopes,
             return_softmax=return_softmax and dropout_p > 0,
-            use_var=use_var,
+            VAR_visiable_kvlen=VAR_visiable_kvlen,
         )
         ctx.save_for_backward(q, k, v, out_padded, softmax_lse, rng_state)
         ctx.dropout_p = dropout_p
@@ -559,6 +544,7 @@ class FlashAttnFunc(torch.autograd.Function):
         ctx.window_size = window_size
         ctx.alibi_slopes = alibi_slopes
         ctx.deterministic = deterministic
+        ctx.VAR_visiable_kvlen = VAR_visiable_kvlen
         return out if not return_softmax else (out, softmax_lse, S_dmask)
 
     @staticmethod
@@ -581,6 +567,7 @@ class FlashAttnFunc(torch.autograd.Function):
             ctx.window_size,
             ctx.alibi_slopes,
             ctx.deterministic,
+            VAR_visiable_kvlen=ctx.VAR_visiable_kvlen,
             rng_state=rng_state,
         )
         dq = dq[..., : dout.shape[-1]]  # We could have padded the head dimension
@@ -681,6 +668,7 @@ def flash_attn_qkvpacked_func(
     alibi_slopes=None,
     deterministic=False,
     return_attn_probs=False,
+    VAR_visiable_kvlen=None,    # None: fall back to original flash_attn
 ):
     """dropout_p should be set to 0.0 during evaluation
     If Q, K, V are already stacked into 1 tensor, this function will be faster than
@@ -706,6 +694,7 @@ def flash_attn_qkvpacked_func(
         return_attn_probs: bool. Whether to return the attention probabilities. This option is for
            testing only. The returned probabilities are not guaranteed to be correct
            (they might not have the right scaling).
+       VAR_visiable_kvlen: (seqlen,), int32. Denoting each q[i] can attend to the first VAR_visiable_kvlen[i] keys
     Return:
         out: (batch_size, seqlen, nheads, headdim).
         softmax_lse [optional, if return_attn_probs=True]: (batch_size, nheads, seqlen). The
@@ -724,6 +713,7 @@ def flash_attn_qkvpacked_func(
         alibi_slopes,
         deterministic,
         return_attn_probs,
+        VAR_visiable_kvlen,
     )
 
 
@@ -737,6 +727,7 @@ def flash_attn_kvpacked_func(
     alibi_slopes=None,
     deterministic=False,
     return_attn_probs=False,
+    VAR_visiable_kvlen=None,    # None: fall back to original flash_attn
 ):
     """dropout_p should be set to 0.0 during evaluation
     If K, V are already stacked into 1 tensor, this function will be faster than
@@ -779,6 +770,7 @@ def flash_attn_kvpacked_func(
         return_attn_probs: bool. Whether to return the attention probabilities. This option is for
            testing only. The returned probabilities are not guaranteed to be correct
            (they might not have the right scaling).
+        VAR_visiable_kvlen: (seqlen_q,), int32. Denoting each q[i] can attend to the first VAR_visiable_kvlen[i] keys
     Return:
         out: (batch_size, seqlen, nheads, headdim).
         softmax_lse [optional, if return_attn_probs=True]: (batch_size, nheads, seqlen). The
@@ -798,6 +790,7 @@ def flash_attn_kvpacked_func(
         alibi_slopes,
         deterministic,
         return_attn_probs,
+        VAR_visiable_kvlen,
     )
 
 
@@ -812,7 +805,7 @@ def flash_attn_func(
     alibi_slopes=None,
     deterministic=False,
     return_attn_probs=False,
-    use_var = False,
+    VAR_visiable_kvlen=None,
 ):
     """dropout_p should be set to 0.0 during evaluation
     Supports multi-query and grouped-query attention (MQA/GQA) by passing in KV with fewer heads
@@ -853,6 +846,7 @@ def flash_attn_func(
         return_attn_probs: bool. Whether to return the attention probabilities. This option is for
            testing only. The returned probabilities are not guaranteed to be correct
            (they might not have the right scaling).
+        VAR_visiable_kvlen: (seqlen,), int32. Denoting each q[i] can attend to the first VAR_visiable_kvlen[i] keys
     Return:
         out: (batch_size, seqlen, nheads, headdim).
         softmax_lse [optional, if return_attn_probs=True]: (batch_size, nheads, seqlen). The
@@ -873,7 +867,7 @@ def flash_attn_func(
         alibi_slopes,
         deterministic,
         return_attn_probs,
-        use_var,
+        VAR_visiable_kvlen,
     )
 
 
@@ -1117,6 +1111,7 @@ def flash_attn_varlen_func(
     )
 
 
+# todo: @keyu: support this with VAR_visiable_kvlen
 def flash_attn_with_kvcache(
     q,
     k_cache,

@@ -82,7 +82,7 @@ void set_params_fprop(Flash_fwd_params &params,
     params.seqused_k = static_cast<int *>(seqused_k);
 
     // if var_block_size is not empty, cast to pointer, otherwise keep as nullptr
-    if(var_block_size.numel() > 0)
+    if (var_block_size.numel() > 0)
     {
         // check data type is kInt32
         TORCH_CHECK(var_block_size.dtype() == torch::kInt32, "var_block_size must have dtype torch.int32");
@@ -475,7 +475,7 @@ mha_fwd(at::Tensor &q,         // batch_size x seqlen_q x num_heads x head_size
                        head_size_rounded, p_dropout, /*num_splits*/0, dprops, opts);
 
     // split kernel with non-empty var_block_size is not supported for now
-    if(var_block_size.numel() > 0)
+    if (var_block_size.numel() > 0)
         assert(params.num_splits == 0);
 
     // number of times random will be generated per thread, to offset philox counter in thc random

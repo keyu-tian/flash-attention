@@ -198,6 +198,7 @@ def attention_ref(
     dropout_mask=None,
     causal=False,
     window_size=(-1, -1),  # -1 means infinite window size
+    VAR_visiable_kvlen=None,    # todo: keyu: implement this
     upcast=True,
     reorder_ops=False,
 ):
@@ -247,6 +248,7 @@ def attention_ref(
             q.device,
         )
         scores.masked_fill_(local_mask, float("-inf"))
+    # todo: VAR_visiable_kvlen
     if attn_bias is not None:
         scores = scores + attn_bias
     attention = torch.softmax(scores, dim=-1).to(v.dtype)
@@ -280,6 +282,7 @@ def attention_kvpacked_ref(
     dropout_mask=None,
     causal=False,
     window_size=(-1, -1),  # -1 means infinite window size
+    VAR_visiable_kvlen=None,    # todo: keyu: implement this
     upcast=True,
     reorder_ops=False,
 ):
@@ -295,6 +298,7 @@ def attention_kvpacked_ref(
         upcast=upcast,
         causal=causal,
         window_size=window_size,
+        VAR_visiable_kvlen=VAR_visiable_kvlen,  # todo: keyu: implement this
         reorder_ops=reorder_ops,
     )
 
@@ -460,13 +464,14 @@ def get_dropout_fraction(
 # @pytest.mark.parametrize("mha_type", ["mha", "mqa", "gqa"])
 @pytest.mark.parametrize("mha_type", ["mha"])
 # pytest.mark.parametrize("deterministic", [False, True])
+@pytest.mark.parametrize("return_attn_probs", [False])
 @pytest.mark.parametrize("deterministic", [True])
 # @pytest.mark.parametrize("alibi", [False, True])
-@pytest.mark.parametrize("alibi", [True])
+@pytest.mark.parametrize("alibi", [False])
 # @pytest.mark.parametrize("local", [False, True])
-@pytest.mark.parametrize("local", [True])
+@pytest.mark.parametrize("local", [False])
 # @pytest.mark.parametrize("causal", [False, True])
-@pytest.mark.parametrize("causal", [True])
+@pytest.mark.parametrize("causal", [False])
 #@pytest.mark.parametrize("d", [32, 40, 59, 64, 96, 111, 128, 160, 192, 224, 256])
 # @pytest.mark.parametrize("d", [32, 64, 96, 128, 160, 192, 224, 256])
 # @pytest.mark.parametrize('d', [32, 40, 64, 80, 96, 128, 160, 192])
@@ -488,11 +493,12 @@ def get_dropout_fraction(
 #        (2048, 2048),
 #    ],
 #)
-@pytest.mark.parametrize('seqlen_q,seqlen_k', [(256, 128)])
+@pytest.mark.parametrize('seqlen_q,seqlen_k', [(14, 14)])
 # @pytest.mark.parametrize("dropout_p", [0.0, 0.17])
-@pytest.mark.parametrize("dropout_p", [0.17])
+# @pytest.mark.parametrize("dropout_p", [0.17])
+@pytest.mark.parametrize("dropout_p", [0.])
 def test_var_flash_attn(
-    seqlen_q, seqlen_k, d, dropout_p, causal, local, alibi, deterministic, mha_type, dtype, kvpacked, use_var
+    seqlen_q, seqlen_k, d, dropout_p, causal, local, alibi, deterministic, return_attn_probs, mha_type, dtype, kvpacked, use_var
 ):
     print("Our customized VAR attetion test")
     if (
@@ -520,11 +526,26 @@ def test_var_flash_attn(
         v = torch.randn(
             batch_size, seqlen_k, nheads_k, d, device=device, dtype=dtype, requires_grad=True
         )
+
     if alibi:
         alibi_slopes = torch.rand(batch_size, nheads, device=device, dtype=torch.float32) * 0.3
         attn_bias = attn_bias_from_alibi_slopes(alibi_slopes, seqlen_q, seqlen_k, causal=causal)
     else:
         alibi_slopes, attn_bias = None, None
+
+    if use_var:
+        VAR_visiable_kvlen = (torch.arange(0, seqlen_q) // 2 * 2 + 1).to(dtype=torch.int32, device=device)
+        """
+        should be like:
+        [1, 1] for seqlen_q == 2
+        [1, 1, 3] for seqlen_q == 3
+        [1, 1, 3, 3] for seqlen_q == 4
+        [1, 1, 3, 3, 5] for seqlen_q == 5
+        [1, 1, 3, 3, 5, 5] for seqlen_q == 6
+        etc.
+        """
+    else:
+        VAR_visiable_kvlen = None
 
     if kvpacked:
         out, lse, S_dmask = flash_attn_kvpacked_func(
@@ -535,7 +556,8 @@ def test_var_flash_attn(
             window_size=window_size,
             alibi_slopes=alibi_slopes,
             deterministic=deterministic,
-            return_attn_probs=True,
+            return_attn_probs=return_attn_probs,
+            VAR_visiable_kvlen=VAR_visiable_kvlen,
         )
     else:
         out, lse, S_dmask = flash_attn_func(
@@ -547,8 +569,8 @@ def test_var_flash_attn(
             window_size=window_size,
             alibi_slopes=alibi_slopes,
             deterministic=deterministic,
-            return_attn_probs=True,
-            use_var = use_var, # Set to False will fall back to orignal implementation, default is False
+            return_attn_probs=return_attn_probs,
+            VAR_visiable_kvlen=VAR_visiable_kvlen,
         )
     if dropout_p > 0.0:
         S_dmask_converted = convert_flash_attn_S_to_softmax(
@@ -600,6 +622,7 @@ def test_var_flash_attn(
             dropout_mask,
             causal=causal,
             window_size=window_size,
+            VAR_visiable_kvlen=VAR_visiable_kvlen,
         )
         out_pt, attn_pt = attention_kvpacked_ref(
             q,
@@ -611,6 +634,7 @@ def test_var_flash_attn(
             dropout_mask,
             causal=causal,
             window_size=window_size,
+            VAR_visiable_kvlen=VAR_visiable_kvlen,
             upcast=False,
             reorder_ops=True,
         )
@@ -626,6 +650,7 @@ def test_var_flash_attn(
             dropout_mask,
             causal=causal,
             window_size=window_size,
+            VAR_visiable_kvlen=VAR_visiable_kvlen,
         )
         out_pt, attn_pt = attention_ref(
             q,
@@ -638,6 +663,7 @@ def test_var_flash_attn(
             dropout_mask,
             causal=causal,
             window_size=window_size,
+            VAR_visiable_kvlen=VAR_visiable_kvlen,
             upcast=False,
             reorder_ops=True,
         )

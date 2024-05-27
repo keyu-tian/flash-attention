@@ -1046,7 +1046,7 @@ inline __device__ void compute_attn(const Params &params) {
 
     // For test only: print content of var_block_size
     // Remove this block in production code
-    if(params.var_block_size != nullptr) {
+    if (params.var_block_size != nullptr) {
         if(threadIdx.x == 0) {
             // should be a 1D vector of in, size is length of q
             printf("var_block_size: ");
