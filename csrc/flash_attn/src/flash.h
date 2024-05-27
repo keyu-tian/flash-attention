@@ -80,8 +80,8 @@ struct Flash_fwd_params : public Qkv_params {
     // If provided, the actual length of each k sequence.
     int * __restrict__ seqused_k;
 
-    // var_block_size, if definer var flash attn is used
-    int * __restrict__ var_block_size = nullptr; 
+    // For VAR-style block-wise causal self-attention.
+    int * __restrict__ VAR_visiable_kvlen = nullptr;
 
     int *__restrict__ blockmask;
 

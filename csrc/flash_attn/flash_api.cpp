@@ -43,8 +43,7 @@ void set_params_fprop(Flash_fwd_params &params,
                       float softmax_scale,
                       int window_size_left,
                       int window_size_right,
-                      bool seqlenq_ngroups_swapped=false,
-                      const at::Tensor var_block_size=torch::Tensor()) {
+                      bool seqlenq_ngroups_swapped=false) {
 
     // Reset the parameters
     params = {};
@@ -80,21 +79,6 @@ void set_params_fprop(Flash_fwd_params &params,
     params.cu_seqlens_q = static_cast<int *>(cu_seqlens_q_d);
     params.cu_seqlens_k = static_cast<int *>(cu_seqlens_k_d);
     params.seqused_k = static_cast<int *>(seqused_k);
-
-    // if var_block_size is not empty, cast to pointer, otherwise keep as nullptr
-    if (var_block_size.numel() > 0)
-    {
-        // check data type is kInt32
-        TORCH_CHECK(var_block_size.dtype() == torch::kInt32, "var_block_size must have dtype torch.int32");
-        // check device
-        CHECK_DEVICE(var_block_size);
-        // check contiguous
-        CHECK_CONTIGUOUS(var_block_size);
-        // check shape, should be a 1D veector, length eqaul to number of attention columns
-        TORCH_CHECK(var_block_size.numel() == (int64_t)seqlen_q, "var_block_size must have length equal to seqlen_q");
-        // set pointer
-        params.var_block_size = var_block_size.data_ptr<int>();
-    }
 
     // P = softmax(QK^T)
     params.p_ptr = p_d;
@@ -184,8 +168,7 @@ void set_params_dgrad(Flash_bwd_params &params,
                       float softmax_scale,
                       int window_size_left,
                       int window_size_right,
-                      bool deterministic,
-                      const at::Tensor var_block_size=torch::Tensor()) {
+                      bool deterministic) {
 
     set_params_fprop(params,
                      b, seqlen_q, seqlen_k, seqlen_q_rounded, seqlen_k_rounded, h, h_k, d, d_rounded,
@@ -198,9 +181,7 @@ void set_params_dgrad(Flash_bwd_params &params,
                      p_dropout,
                      softmax_scale,
                      window_size_left,
-                     window_size_right,
-                     /*seqlenq_ngroups_swapped*/false,
-                     var_block_size);
+                     window_size_right);
 
     // Set the pointers and strides.
     params.do_ptr = dout.data_ptr();
@@ -333,6 +314,23 @@ void set_params_alibi(Flash_fwd_params &params, c10::optional<at::Tensor> &alibi
 #endif
 }
 
+void set_params_VAR_visiable_kvlen(Flash_fwd_params &params, c10::optional<at::Tensor> &VAR_visiable_kvlen_) {
+    if (VAR_visiable_kvlen_.has_value()) {
+        auto &VAR_visiable_kvlen = VAR_visiable_kvlen_.value();
+        TORCH_CHECK(VAR_visiable_kvlen.dtype() == torch::kInt32, "VAR_visiable_kvlen must have dtype torch.int32");
+        CHECK_DEVICE(VAR_visiable_kvlen);
+        CHECK_CONTIGUOUS(VAR_visiable_kvlen);
+        // check shape, should be a 1D veector, length eqaul to number of attention columns
+        TORCH_CHECK(VAR_visiable_kvlen.numel() == (int64_t)seqlen_q, "VAR_visiable_kvlen must have length equal to seqlen_q");
+        // split kernel is only used in mha_fwd_kvcache, so no need to check it here
+        // set the ptr
+        params.VAR_visiable_kvlen = VAR_visiable_kvlen.data_ptr<int>();
+    } else {
+        params.VAR_visiable_kvlen = nullptr;
+    }
+}
+
+
 std::vector<at::Tensor>
 mha_fwd(at::Tensor &q,         // batch_size x seqlen_q x num_heads x head_size
         const at::Tensor &k,         // batch_size x seqlen_k x num_heads_k x head_size
@@ -345,8 +343,8 @@ mha_fwd(at::Tensor &q,         // batch_size x seqlen_q x num_heads x head_size
         int window_size_left,
         int window_size_right,
         const bool return_softmax,
-        c10::optional<at::Generator> gen_,
-        const at::Tensor &var_block_size=torch::Tensor()) {
+        c10::optional<at::Tensor> &VAR_visiable_kvlen_, // 1D tensor, int32, seqlen_q
+        c10::optional<at::Generator> gen_) {
 
     auto dprops = at::cuda::getCurrentDeviceProperties();
     // bool is_sm75 = dprops->major == 7 && dprops->minor == 5;
@@ -466,17 +464,12 @@ mha_fwd(at::Tensor &q,         // batch_size x seqlen_q x num_heads x head_size
                      p_dropout,
                      softmax_scale,
                      window_size_left,
-                     window_size_right,
-                     /*seqlenq_ngroups_swapped*/false,
-                     var_block_size);
+                     window_size_right);
+
 
     set_params_splitkv(params, batch_size, num_heads,
                        head_size, seqlen_k, seqlen_q,
                        head_size_rounded, p_dropout, /*num_splits*/0, dprops, opts);
-
-    // split kernel with non-empty var_block_size is not supported for now
-    if (var_block_size.numel() > 0)
-        assert(params.num_splits == 0);
 
     // number of times random will be generated per thread, to offset philox counter in thc random
     // state
@@ -496,6 +489,8 @@ mha_fwd(at::Tensor &q,         // batch_size x seqlen_q x num_heads x head_size
     }
 
     set_params_alibi(params, alibi_slopes_, batch_size, num_heads);
+    // similar to set_params_alibi
+    set_params_VAR_visiable_kvlen(params, VAR_visiable_kvlen_)
 
     if (seqlen_k > 0) {
         auto stream = at::cuda::getCurrentCUDAStream().stream();
@@ -795,9 +790,9 @@ mha_bwd(const at::Tensor &dout,  // batch_size x seqlen_q x num_heads, x head_si
         int window_size_left,
         int window_size_right,
         const bool deterministic,
+        c10::optional<at::Tensor> &VAR_visiable_kvlen_, // 1D tensor, int32, seqlen_q
         c10::optional<at::Generator> gen_,
-        c10::optional<at::Tensor> &rng_state,
-        const at::Tensor &var_block_size=at::Tensor()) {
+        c10::optional<at::Tensor> &rng_state) {
 
     #ifdef FLASHATTENTION_DISABLE_BACKWARD
         TORCH_CHECK(false, "This flash attention build does not support backward.");
@@ -959,8 +954,7 @@ mha_bwd(const at::Tensor &dout,  // batch_size x seqlen_q x num_heads, x head_si
                      softmax_scale,
                      window_size_left,
                      window_size_right,
-                     deterministic,
-                     var_block_size);
+                     deterministic);
     params.dq_accum_split_stride = !deterministic ? 0 : dq_accum.stride(0);
 
     auto launch = &run_mha_bwd;
@@ -983,6 +977,8 @@ mha_bwd(const at::Tensor &dout,  // batch_size x seqlen_q x num_heads, x head_si
     }
 
     set_params_alibi(params, alibi_slopes_, batch_size, num_heads);
+    // similar to set_params_alibi
+    set_params_VAR_visiable_kvlen(params, VAR_visiable_kvlen_)
 
     if (seqlen_q > 0) {
         launch(params, stream);

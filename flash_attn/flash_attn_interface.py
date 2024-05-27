@@ -61,8 +61,8 @@ def _flash_attn_forward(
         window_size[0],
         window_size[1],
         return_softmax,
-        None,
         VAR_visiable_kvlen,
+        None,   # in flash_api.cpp: c10::optional<at::Generator> gen_
     )
     return out, q, k, v, out_padded, softmax_lse, S_dmask, rng_state
 
@@ -152,8 +152,8 @@ def _flash_attn_backward(
         window_size[1],
         deterministic,
         VAR_visiable_kvlen,
-        None,
-        rng_state,
+        None,       # in flash_api.cpp: c10::optional<at::Generator> gen_
+        rng_state,  # in flash_api.cpp: c10::optional<at::Tensor> &rng_state
     )
     return dq, dk, dv, softmax_d
 
