@@ -1044,14 +1044,14 @@ inline __device__ void compute_attn(const Params &params) {
     // The block index for the head.
     const int bidh = blockIdx.z;
 
-    // For test only: print content of VAR_visiable_kvlen
+    // For test only: print content of VAR_visible_kvlen
     // Remove this block in production code
-    if (params.VAR_visiable_kvlen != nullptr) {
+    if (params.VAR_visible_kvlen != nullptr) {
         if (threadIdx.x == 0) {
             // should be a 1D vector of int32, shaped (seqlen_q,)
-            printf("VAR_visiable_kvlen (%d,): [", params.seqlen_q);
+            printf("VAR_visible_kvlen (%d,): [", params.seqlen_q);
             for (int qi = 0; qi < params.seqlen_q; qi++) {
-                printf("%d, ", params.VAR_visiable_kvlen[qi]);
+                printf("%d, ", params.VAR_visible_kvlen[qi]);
             }
             printf("]\n");
         }

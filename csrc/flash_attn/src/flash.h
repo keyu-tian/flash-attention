@@ -81,7 +81,7 @@ struct Flash_fwd_params : public Qkv_params {
     int * __restrict__ seqused_k;
 
     // For VAR-style block-wise causal self-attention.
-    int * __restrict__ VAR_visiable_kvlen = nullptr;
+    int * __restrict__ VAR_visible_kvlen = nullptr;
 
     int *__restrict__ blockmask;
 

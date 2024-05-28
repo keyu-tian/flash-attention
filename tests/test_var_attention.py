@@ -198,7 +198,7 @@ def attention_ref(
     dropout_mask=None,
     causal=False,
     window_size=(-1, -1),  # -1 means infinite window size
-    VAR_visiable_kvlen=None,    # todo: keyu: implement this
+    VAR_visible_kvlen=None,    # todo: keyu: implement this
     upcast=True,
     reorder_ops=False,
 ):
@@ -248,7 +248,7 @@ def attention_ref(
             q.device,
         )
         scores.masked_fill_(local_mask, float("-inf"))
-    # todo: VAR_visiable_kvlen
+    # todo: VAR_visible_kvlen
     if attn_bias is not None:
         scores = scores + attn_bias
     attention = torch.softmax(scores, dim=-1).to(v.dtype)
@@ -282,7 +282,7 @@ def attention_kvpacked_ref(
     dropout_mask=None,
     causal=False,
     window_size=(-1, -1),  # -1 means infinite window size
-    VAR_visiable_kvlen=None,    # todo: keyu: implement this
+    VAR_visible_kvlen=None,    # todo: keyu: implement this
     upcast=True,
     reorder_ops=False,
 ):
@@ -298,7 +298,7 @@ def attention_kvpacked_ref(
         upcast=upcast,
         causal=causal,
         window_size=window_size,
-        VAR_visiable_kvlen=VAR_visiable_kvlen,  # todo: keyu: implement this
+        VAR_visible_kvlen=VAR_visible_kvlen,  # todo: keyu: implement this
         reorder_ops=reorder_ops,
     )
 
@@ -534,7 +534,7 @@ def test_var_flash_attn(
         alibi_slopes, attn_bias = None, None
 
     if use_var:
-        VAR_visiable_kvlen = (torch.arange(0, seqlen_q) // 2 * 2 + 1).to(dtype=torch.int32, device=device)
+        VAR_visible_kvlen = (torch.arange(0, seqlen_q) // 2 * 2 + 1).to(dtype=torch.int32, device=device)
         """
         should be like:
         [1, 1] for seqlen_q == 2
@@ -545,7 +545,7 @@ def test_var_flash_attn(
         etc.
         """
     else:
-        VAR_visiable_kvlen = None
+        VAR_visible_kvlen = None
 
     if kvpacked:
         out, lse, S_dmask = flash_attn_kvpacked_func(
@@ -557,7 +557,7 @@ def test_var_flash_attn(
             alibi_slopes=alibi_slopes,
             deterministic=deterministic,
             return_attn_probs=return_attn_probs,
-            VAR_visiable_kvlen=VAR_visiable_kvlen,
+            VAR_visible_kvlen=VAR_visible_kvlen,
         )
     else:
         out, lse, S_dmask = flash_attn_func(
@@ -570,7 +570,7 @@ def test_var_flash_attn(
             alibi_slopes=alibi_slopes,
             deterministic=deterministic,
             return_attn_probs=return_attn_probs,
-            VAR_visiable_kvlen=VAR_visiable_kvlen,
+            VAR_visible_kvlen=VAR_visible_kvlen,
         )
     if dropout_p > 0.0:
         S_dmask_converted = convert_flash_attn_S_to_softmax(
@@ -622,7 +622,7 @@ def test_var_flash_attn(
             dropout_mask,
             causal=causal,
             window_size=window_size,
-            VAR_visiable_kvlen=VAR_visiable_kvlen,
+            VAR_visible_kvlen=VAR_visible_kvlen,
         )
         out_pt, attn_pt = attention_kvpacked_ref(
             q,
@@ -634,7 +634,7 @@ def test_var_flash_attn(
             dropout_mask,
             causal=causal,
             window_size=window_size,
-            VAR_visiable_kvlen=VAR_visiable_kvlen,
+            VAR_visible_kvlen=VAR_visible_kvlen,
             upcast=False,
             reorder_ops=True,
         )
@@ -650,7 +650,7 @@ def test_var_flash_attn(
             dropout_mask,
             causal=causal,
             window_size=window_size,
-            VAR_visiable_kvlen=VAR_visiable_kvlen,
+            VAR_visible_kvlen=VAR_visible_kvlen,
         )
         out_pt, attn_pt = attention_ref(
             q,
@@ -663,7 +663,7 @@ def test_var_flash_attn(
             dropout_mask,
             causal=causal,
             window_size=window_size,
-            VAR_visiable_kvlen=VAR_visiable_kvlen,
+            VAR_visible_kvlen=VAR_visible_kvlen,
             upcast=False,
             reorder_ops=True,
         )
