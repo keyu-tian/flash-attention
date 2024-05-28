@@ -26,6 +26,11 @@ using namespace cute;
 
 template<typename Kernel_traits, bool Is_dropout, bool Is_causal, bool Is_local, bool Has_alibi, bool Is_even_MN, bool Is_even_K, bool Return_softmax, typename Params>
 inline __device__ void compute_attn_1rowblock(const Params &params, const int bidb, const int bidh, const int m_block) {
+    /* Params: class Flash_fwd_params
+     * m_block: (== blockIdx.x);
+     * bidb: The block index for the batch. (== blockIdx.y);
+     * bidh: The block index for the head. (== blockIdx.z);
+     * */
 
     using Element = typename Kernel_traits::Element;
     using ElementAccum = typename Kernel_traits::ElementAccum;
@@ -263,11 +268,11 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
     flash::Softmax<2 * size<1>(acc_o)> softmax;
 
     const float alibi_slope = !Has_alibi || params.alibi_slopes_ptr == nullptr ? 0.0f : reinterpret_cast<float *>(params.alibi_slopes_ptr)[bidb * params.alibi_slopes_batch_stride + bidh] / params.scale_softmax;
-    flash::Mask<Is_causal, Is_local, Has_alibi> mask(binfo.actual_seqlen_k, binfo.actual_seqlen_q, params.window_size_left, params.window_size_right, alibi_slope);
+    flash::Mask<Is_causal, Is_local, Has_alibi> mask(binfo.actual_seqlen_k, binfo.actual_seqlen_q, params.window_size_left, params.window_size_right, alibi_slope, params.VAR_visible_kvlen);
 
     // For performance reason, we separate out two kinds of iterations:
     // those that need masking on S, and those that don't.
-    // We need masking on S for the very last block when K and V has length not multiple of kBlockN.
+    // We need masking on S for the very last block when K and V has length not multiple of kBlockN. @keyu: mask out the paddings?
     // We also need masking on S if it's causal, for the last ceil_div(kBlockM, kBlockN) blocks.
     // We will have at least 1 "masking" iteration.
 
@@ -809,7 +814,7 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
     flash::Softmax<2 * size<1>(acc_o)> softmax;
 
     const float alibi_slope = !Has_alibi ? 0.0f : reinterpret_cast<float *>(params.alibi_slopes_ptr)[bidb * params.alibi_slopes_batch_stride + bidh] / params.scale_softmax;
-    flash::Mask<Is_causal, Is_local, Has_alibi> mask(binfo.actual_seqlen_k, binfo.actual_seqlen_q, params.window_size_left, params.window_size_right, alibi_slope);
+    flash::Mask<Is_causal, Is_local, Has_alibi> mask(binfo.actual_seqlen_k, binfo.actual_seqlen_q, params.window_size_left, params.window_size_right, alibi_slope, params.VAR_visible_kvlen);
 
     // For performance reason, we separate out two kinds of iterations:
     // those that need masking on S, and those that don't.
@@ -1036,6 +1041,7 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
+// this is called in flash_fwd_launch_template.h
 template<typename Kernel_traits, bool Is_dropout, bool Is_causal, bool Is_local, bool Has_alibi, bool Is_even_MN, bool Is_even_K, bool Return_softmax, typename Params>
 inline __device__ void compute_attn(const Params &params) {
     const int m_block = blockIdx.x;
@@ -1043,20 +1049,20 @@ inline __device__ void compute_attn(const Params &params) {
     const int bidb = blockIdx.y;
     // The block index for the head.
     const int bidh = blockIdx.z;
-
+/*
     // For test only: print content of VAR_visible_kvlen
     // Remove this block in production code
     if (params.VAR_visible_kvlen != nullptr) {
-        if (threadIdx.x == 0) {
+        if (cute::thread0()) {
             // should be a 1D vector of int32, shaped (seqlen_q,)
-            printf("VAR_visible_kvlen (%d,): [", params.seqlen_q);
+            printf("[cute::thread0] VAR_visible_kvlen (%d,): [", params.seqlen_q);
             for (int qi = 0; qi < params.seqlen_q; qi++) {
                 printf("%d, ", params.VAR_visible_kvlen[qi]);
             }
             printf("]\n");
         }
     }
-
+*/
     // We want the fwd and bwd to generate the same dropout pattern (RNG), without restricting
     // them to have the same number of threads or have to traverse the attention matrix
     // in the same order.

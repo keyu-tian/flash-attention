@@ -198,7 +198,7 @@ def attention_ref(
     dropout_mask=None,
     causal=False,
     window_size=(-1, -1),  # -1 means infinite window size
-    VAR_visible_kvlen=None,    # todo: keyu: implement this
+    VAR_visible_kvlen=None,    # todo: @keyu: implement this
     upcast=True,
     reorder_ops=False,
 ):

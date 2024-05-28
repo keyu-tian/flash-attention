@@ -10,6 +10,8 @@ namespace flash {
 
 using namespace cute;
 
+// only used in Backward, flash_bwd_kernel.h @ commit 22339db185027324f334a7f59e2584da266bfd4c
+// @keyu: I feel like this is used to mask out padded tokens
 template <typename Engine, typename Layout>
 __forceinline__ __device__ void apply_mask(Tensor<Engine, Layout> &tensor, const int max_seqlen_k,
                                   const int col_idx_offset_ = 0) {
@@ -34,15 +36,18 @@ __forceinline__ __device__ void apply_mask(Tensor<Engine, Layout> &tensor, const
     }
 }
 
+// only used in Backward, flash_bwd_kernel.h @ commit 22339db185027324f334a7f59e2584da266bfd4c
 template <bool HasWSLeft=true, typename Engine, typename Layout>
 __forceinline__ __device__ void apply_mask_local(Tensor<Engine, Layout> &tensor, const int col_idx_offset_,
                                         const int max_seqlen_k, const int row_idx_offset,
                                         const int max_seqlen_q, const int warp_row_stride,
-                                        const int window_size_left, const int window_size_right) {
+                                        const int window_size_left, const int window_size_right,
+                                        const int * __restrict__ VAR_visible_kvlen) {
     // tensor has shape (ncol=(2, MMA_M), nrow=(2, MMA_N))
     static_assert(Layout::rank == 2, "Only support 2D Tensor");
     const int lane_id = threadIdx.x % 32;
     const int col_idx_offset = col_idx_offset_ + (lane_id % 4) * 2;
+    const bool VAR_causal = VAR_visible_kvlen == nullptr;
     #pragma unroll
     for (int mi = 0; mi < size<0, 1>(tensor); ++mi) {
         const int row_idx_base = row_idx_offset + mi * warp_row_stride;
@@ -50,7 +55,11 @@ __forceinline__ __device__ void apply_mask_local(Tensor<Engine, Layout> &tensor,
         for (int i = 0; i < size<0, 0>(tensor); ++i) {
             const int row_idx = row_idx_base + i * 8;
             const int col_idx_limit_left = std::max(0, row_idx + max_seqlen_k - max_seqlen_q - window_size_left);
-            const int col_idx_limit_right = std::min(max_seqlen_k, row_idx + 1 + max_seqlen_k - max_seqlen_q + window_size_right);
+            const int col_idx_limit_right = std::min(
+                max_seqlen_k,
+                // todo: @keyu: can we safely remove std::min, directly use row_idx?
+                VAR_causal ? VAR_visible_kvlen[std::min(row_idx, max_seqlen_q)] : (row_idx + 1 + max_seqlen_k - max_seqlen_q + window_size_right)
+            );
             #pragma unroll
             for (int nj = 0; nj < size<1, 1>(tensor); ++nj) {
                 const int col_idx_base = col_idx_offset + nj * 8;
@@ -71,15 +80,20 @@ __forceinline__ __device__ void apply_mask_local(Tensor<Engine, Layout> &tensor,
     }
 }
 
+// only used in Backward, flash_bwd_kernel.h @ commit 22339db185027324f334a7f59e2584da266bfd4c
 template <typename Engine, typename Layout>
 __forceinline__ __device__ void apply_mask_causal(Tensor<Engine, Layout> &tensor, const int col_idx_offset_,
                                          const int max_seqlen_k, const int row_idx_offset,
-                                         const int max_seqlen_q, const int warp_row_stride) {
+                                         const int max_seqlen_q, const int warp_row_stride,
+                                         const int * __restrict__ VAR_visible_kvlen) {
     // Causal masking is equivalent to local masking with window_size_left = infinity and window_size_right = 0
     apply_mask_local</*HasWSLeft=*/false>(tensor, col_idx_offset_, max_seqlen_k, row_idx_offset,
-                                          max_seqlen_q, warp_row_stride, -1, 0);
+                                          max_seqlen_q, warp_row_stride,
+                                          /*window_size_left=*/-1, /*window_size_right=*/0,
+                                          VAR_visible_kvlen);
 }
 
+// NEVER used @ commit 22339db185027324f334a7f59e2584da266bfd4c
 template <typename Engine0, typename Layout0, typename Engine1, typename Layout1>
 __forceinline__ __device__ void apply_mask_causal_w_idx(
     Tensor<Engine0, Layout0> &tensor, Tensor<Engine1, Layout1> const &idx_rowcol,
@@ -107,21 +121,27 @@ __forceinline__ __device__ void apply_mask_causal_w_idx(
     }
 }
 
+
+// only used in Forward, flash_fwd_kernel.h @ commit 22339db185027324f334a7f59e2584da266bfd4c
+// VAR mask (block-wise causal mask) is a special case of causal mask
+//   so its Is_causal=true, so Is_local=false (Is_causal and Is_local cannot be true at same time), and Has_alibi=false
 template <bool Is_causal, bool Is_local, bool Has_alibi>
 struct Mask {
 
     const int max_seqlen_k, max_seqlen_q;
     const int window_size_left, window_size_right;
     const float alibi_slope;
+    const int * __restrict__ VAR_visible_kvlen;
 
     __forceinline__ __device__ Mask(const int max_seqlen_k, const int max_seqlen_q,
                                     const int window_size_left, const int window_size_right,
-                                    const float alibi_slope=0.f)
+                                    const float alibi_slope=0.f, const int * __restrict__ VAR_visible_kvlen=nullptr)
         : max_seqlen_k(max_seqlen_k)
         , max_seqlen_q(max_seqlen_q)
         , window_size_left(window_size_left)
         , window_size_right(window_size_right)
-        , alibi_slope(!Has_alibi ? 0.0 : alibi_slope) {
+        , alibi_slope(!Has_alibi ? 0.0 : alibi_slope)
+        , VAR_visible_kvlen(VAR_visible_kvlen) {
     };
 
     // Causal_mask: whether this particular iteration needs causal masking
@@ -140,6 +160,7 @@ struct Mask {
             Tensor tensor = make_tensor(tensor_.data(), flash::convert_layout_acc_rowcol(tensor_.layout()));
             // Do we need both row and column indices, or just column incides?
             static constexpr bool Col_idx_only = !(Has_alibi && !Is_causal) && !Is_local && !Causal_mask;
+            const bool VAR_causal = VAR_visible_kvlen == nullptr;
             const int lane_id = threadIdx.x % 32;
             const int col_idx_offset = col_idx_offset_ + (lane_id % 4) * 2;
             if constexpr (Col_idx_only) {
@@ -156,7 +177,9 @@ struct Mask {
                                 tensor(mi, make_coord(j, nj)) += alibi_slope * col_idx;
                             }
                             if constexpr (!Is_even_MN) {
-                                if (col_idx >= max_seqlen_k) { tensor(mi, make_coord(j, nj)) = -INFINITY; }
+                                if (col_idx >= max_seqlen_k) {      // @keyu: I feel like this is used to mask out padded tokens
+                                    tensor(mi, make_coord(j, nj)) = -INFINITY;
+                                }
                             }
                         }
                     }
@@ -169,7 +192,11 @@ struct Mask {
                     for (int i = 0; i < size<0, 0>(tensor); ++i) {
                         const int row_idx = row_idx_base + i * 8;
                         const int col_idx_limit_left = std::max(0, row_idx + max_seqlen_k - max_seqlen_q - window_size_left);
-                        const int col_idx_limit_right = std::min(max_seqlen_k, row_idx + 1 + max_seqlen_k - max_seqlen_q + window_size_right);
+                        const int col_idx_limit_right = std::min(
+                            max_seqlen_k,
+                            // todo: @keyu: can we safely remove std::min, directly use row_idx?
+                            VAR_causal ? VAR_visible_kvlen[std::min(row_idx, max_seqlen_q)] : (row_idx + 1 + max_seqlen_k - max_seqlen_q + window_size_right)
+                        );
                         #pragma unroll
                         for (int nj = 0; nj < size<1, 1>(tensor); ++nj) {
                             const int col_idx_base = col_idx_offset + nj * 8;
@@ -196,7 +223,7 @@ struct Mask {
                                 }
                                 if constexpr (!Causal_mask && !Is_local && !Is_even_MN) {
                                     // Causal and Local already handles MN masking
-                                    if (col_idx >= max_seqlen_k) {
+                                    if (col_idx >= max_seqlen_k) {      // @keyu: I feel like this is used to mask out padded tokens
                                         tensor(make_coord(i, mi), make_coord(j, nj)) = -INFINITY;
                                     }
                                 }

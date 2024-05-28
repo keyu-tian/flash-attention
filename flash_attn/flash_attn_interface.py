@@ -57,7 +57,7 @@ def _flash_attn_forward(
         alibi_slopes,
         dropout_p,
         softmax_scale,
-        causal,
+        causal or VAR_visible_kvlen is not None,    # VAR mask (block-wise causal mask) is a special case of causal mask
         window_size[0],
         window_size[1],
         return_softmax,
@@ -147,7 +147,7 @@ def _flash_attn_backward(
         alibi_slopes,
         dropout_p,
         softmax_scale,
-        causal,
+        causal or VAR_visible_kvlen is not None,    # VAR mask (block-wise causal mask) is a special case of causal mask
         window_size[0],
         window_size[1],
         deterministic,

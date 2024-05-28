@@ -119,11 +119,12 @@ void set_params_fprop(Flash_fwd_params &params,
     // Causal is the special case where window_size_right == 0 and window_size_left < 0.
     // Local is the more general case where window_size_right >= 0 or window_size_left >= 0.
     params.is_causal = window_size_left < 0 && window_size_right == 0;
+    // if is_causal: window_size_left == -1, window_size_right == 0
 
     if (window_size_left < 0 && window_size_right >= 0) { window_size_left = seqlen_k; }
     if (window_size_left >= 0 && window_size_right < 0) { window_size_right = seqlen_k; }
-    params.window_size_left = window_size_left;
-    params.window_size_right = window_size_right;
+    params.window_size_left = window_size_left;     // if is_causal: params.window_size_left == seqlen_k
+    params.window_size_right = window_size_right;   // if is_causal: params.window_size_right == 0
 
     #ifdef FLASHATTENTION_DISABLE_LOCAL
         TORCH_CHECK(params.is_causal || (window_size_left < 0 && window_size_right < 0),
