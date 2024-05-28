@@ -314,7 +314,7 @@ void set_params_alibi(Flash_fwd_params &params, c10::optional<at::Tensor> &alibi
 #endif
 }
 
-void set_params_VAR_visiable_kvlen(Flash_fwd_params &params, c10::optional<at::Tensor> &VAR_visiable_kvlen_) {
+void set_params_VAR_visiable_kvlen(Flash_fwd_params &params, c10::optional<at::Tensor> &VAR_visiable_kvlen_, const int seqlen_q) {
     if (VAR_visiable_kvlen_.has_value()) {
         auto &VAR_visiable_kvlen = VAR_visiable_kvlen_.value();
         TORCH_CHECK(VAR_visiable_kvlen.dtype() == torch::kInt32, "VAR_visiable_kvlen must have dtype torch.int32");
@@ -490,7 +490,7 @@ mha_fwd(at::Tensor &q,         // batch_size x seqlen_q x num_heads x head_size
 
     set_params_alibi(params, alibi_slopes_, batch_size, num_heads);
     // similar to set_params_alibi
-    set_params_VAR_visiable_kvlen(params, VAR_visiable_kvlen_)
+    set_params_VAR_visiable_kvlen(params, VAR_visiable_kvlen_, seqlen_q);
 
     if (seqlen_k > 0) {
         auto stream = at::cuda::getCurrentCUDAStream().stream();
@@ -978,7 +978,7 @@ mha_bwd(const at::Tensor &dout,  // batch_size x seqlen_q x num_heads, x head_si
 
     set_params_alibi(params, alibi_slopes_, batch_size, num_heads);
     // similar to set_params_alibi
-    set_params_VAR_visiable_kvlen(params, VAR_visiable_kvlen_)
+    set_params_VAR_visiable_kvlen(params, VAR_visiable_kvlen_, seqlen_q);
 
     if (seqlen_q > 0) {
         launch(params, stream);
