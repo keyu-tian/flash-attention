@@ -78,7 +78,7 @@ void set_params_fprop(Flash_fwd_params &params,
 
     params.cu_seqlens_q = static_cast<int *>(cu_seqlens_q_d);
     params.cu_seqlens_k = static_cast<int *>(cu_seqlens_k_d);
-    params.seqused_k = static_cast<int *>(seqused_k);
+    params.seqused_k = static_cast<int *>(seqused_k);   // @keyu: always nullptr @ commit 22339db1
 
     // P = softmax(QK^T)
     params.p_ptr = p_d;

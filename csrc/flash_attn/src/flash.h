@@ -78,7 +78,7 @@ struct Flash_fwd_params : public Qkv_params {
     int * __restrict__ cu_seqlens_k;
 
     // If provided, the actual length of each k sequence.
-    int * __restrict__ seqused_k;
+    int * __restrict__ seqused_k;   // @keyu: always nullptr @ commit 22339db1
 
     // For VAR-style block-wise causal self-attention.
     int * __restrict__ VAR_visible_kvlen = nullptr;
@@ -120,7 +120,7 @@ struct Flash_fwd_params : public Qkv_params {
     float scale_softmax_rp_dropout;
 
     // Local window size
-    int window_size_left, window_size_right;
+    int window_size_left, window_size_right;    // if is_causal: window_size_left == -1, window_size_right == 0
 
     // Random state.
     at::PhiloxCudaState philox_args;

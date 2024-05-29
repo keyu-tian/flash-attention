@@ -89,8 +89,8 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
     // The thread index.
     const int tidx = threadIdx.x;
 
-    constexpr int kBlockM = Kernel_traits::kBlockM;
-    constexpr int kBlockN = Kernel_traits::kBlockN;
+    constexpr int kBlockM = Kernel_traits::kBlockM;     // chunk Q into len=kBlockM count=m_block_max blocks
+    constexpr int kBlockN = Kernel_traits::kBlockN;     // chunk K into len=kBlockN count=n_block blocks
     constexpr int kHeadDim = Kernel_traits::kHeadDim;
     constexpr int MMA_N_SdP = kBlockN / decltype(typename Kernel_traits::TiledMmaSdP{}.template tile_size_mnk<1>())::value;
     constexpr int AtomLayoutMS = Kernel_traits::AtomLayoutMSdP;
@@ -488,12 +488,17 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
         // However, it's possible that the values in acc_s are so large that they overflow
         // when we multiply with dP and convert to fp16, resulting in Inf in dS and NaNs in dQ.
         // So we need to mask out the elements beyond actual_seqlen_k.
+
+        // @keyu: !Is_even_MN means there exists the next K block
+        //        (n_block + 1) * kBlockN >= binfo.actual_seqlen_k means the next K block will be OOB of actual_seqlen_k
+        //        So if both conds are true, we need to mask this block
         if (!Is_causal && !Is_local) {      // not causal, not VAR
             if (!Is_even_MN && (n_block + 1) * kBlockN >= binfo.actual_seqlen_k) {
                 flash::apply_mask(scores, binfo.actual_seqlen_k,
                                   n_block * kBlockN + (tidx / 32 / AtomLayoutMS) * MMA_N_SdP * 16);
             }
         } else if (Is_causal) {             // could be VAR causal
+            // @keyu: the 1st condition means whether the start of the current Q block is less than the end of the current K block; only in this case (e.g., in the upper right of S) we need to mask
             // Putting this causal masking right after acc_s is *much* slower for some reason.
             // TD [2023-08-16]: We need the 2nd condition because if seqlen_q is long and seqlen_k is short
             // (e.g., 256 and 2), the 2nd block of seqlen_q (from 128 to 255), we're not doing causal masking.

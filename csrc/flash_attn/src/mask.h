@@ -10,8 +10,7 @@ namespace flash {
 
 using namespace cute;
 
-// only used in Backward, flash_bwd_kernel.h @ commit 22339db185027324f334a7f59e2584da266bfd4c
-// @keyu: I feel like this is used to mask out padded tokens
+// only used if !Is_causal && !Is_local, in Backward, flash_bwd_kernel.h @ commit 22339db1
 template <typename Engine, typename Layout>
 __forceinline__ __device__ void apply_mask(Tensor<Engine, Layout> &tensor, const int max_seqlen_k,
                                   const int col_idx_offset_ = 0) {
@@ -36,7 +35,7 @@ __forceinline__ __device__ void apply_mask(Tensor<Engine, Layout> &tensor, const
     }
 }
 
-// only used in Backward, flash_bwd_kernel.h @ commit 22339db185027324f334a7f59e2584da266bfd4c
+// only used if Is_local in Backward, flash_bwd_kernel.h @ commit 22339db1
 template <bool HasWSLeft=true, typename Engine, typename Layout>
 __forceinline__ __device__ void apply_mask_local(Tensor<Engine, Layout> &tensor, const int col_idx_offset_,
                                         const int max_seqlen_k, const int row_idx_offset,
@@ -80,7 +79,7 @@ __forceinline__ __device__ void apply_mask_local(Tensor<Engine, Layout> &tensor,
     }
 }
 
-// only used in Backward, flash_bwd_kernel.h @ commit 22339db185027324f334a7f59e2584da266bfd4c
+// only used if Is_causal in Backward, flash_bwd_kernel.h @ commit 22339db1
 template <typename Engine, typename Layout>
 __forceinline__ __device__ void apply_mask_causal(Tensor<Engine, Layout> &tensor, const int col_idx_offset_,
                                          const int max_seqlen_k, const int row_idx_offset,
@@ -93,7 +92,7 @@ __forceinline__ __device__ void apply_mask_causal(Tensor<Engine, Layout> &tensor
                                           VAR_visible_kvlen);
 }
 
-// NEVER used @ commit 22339db185027324f334a7f59e2584da266bfd4c
+// NEVER used @ commit 22339db1
 template <typename Engine0, typename Layout0, typename Engine1, typename Layout1>
 __forceinline__ __device__ void apply_mask_causal_w_idx(
     Tensor<Engine0, Layout0> &tensor, Tensor<Engine1, Layout1> const &idx_rowcol,
@@ -122,7 +121,7 @@ __forceinline__ __device__ void apply_mask_causal_w_idx(
 }
 
 
-// only used in Forward, flash_fwd_kernel.h @ commit 22339db185027324f334a7f59e2584da266bfd4c
+// only used in Forward, flash_fwd_kernel.h @ commit 22339db1
 // VAR mask (block-wise causal mask) is a special case of causal mask
 //   so its Is_causal=true, so Is_local=false (Is_causal and Is_local cannot be true at same time), and Has_alibi=false
 template <bool Is_causal, bool Is_local, bool Has_alibi>
