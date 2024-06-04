@@ -27,9 +27,9 @@ using namespace cute;
 template<typename Kernel_traits, bool Is_dropout, bool Is_causal, bool Is_local, bool Has_alibi, bool Is_even_MN, bool Is_even_K, bool Return_softmax, typename Params>
 inline __device__ void compute_attn_1rowblock(const Params &params, const int bidb, const int bidh, const int m_block) {
     /* Params: class Flash_fwd_params
-     * m_block: (== blockIdx.x);
      * bidb: The block index for the batch. (== blockIdx.y);
      * bidh: The block index for the head. (== blockIdx.z);
+     * m_block: (== blockIdx.x);
      * */
 
     using Element = typename Kernel_traits::Element;
@@ -37,7 +37,7 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
     using index_t = typename Kernel_traits::index_t;
 
     // Shared memory.
-    extern __shared__ char smem_[];
+    extern __shared__ char smem_[];     // todo @keyu: can we use faster memory (like HBM) to save our params.VAR_visible_kvlen?
 
     // The thread index.
     const int tidx = threadIdx.x;
@@ -61,18 +61,27 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
     const BlockInfo</*Varlen=*/!Is_even_MN> binfo(params, bidb);
     if (m_block * kBlockM >= binfo.actual_seqlen_q) return;
 
+    const bool is_VAR_causal = Is_causal and (params.VAR_visible_kvlen != nullptr);
+
     const int n_block_min = !Is_local ? 0 : std::max(0, (m_block * kBlockM + binfo.actual_seqlen_k - binfo.actual_seqlen_q - params.window_size_left) / kBlockN);
     int n_block_max = cute::ceil_div(binfo.actual_seqlen_k, kBlockN);
     if (Is_causal || Is_local) {
-        n_block_max = std::min(n_block_max,
-                               cute::ceil_div((m_block + 1) * kBlockM + binfo.actual_seqlen_k - binfo.actual_seqlen_q + params.window_size_right, kBlockN));
+//        if (is_VAR_causal and cute::thread0()) {
+//            printf("[Q:%dx%d, K:%dx%d], binfo.actual_seqlen_q=%d, binfo.actual_seqlen_k=%d, params.window_size_right=%d\n",
+//                   m_block, kBlockM, n_block_max-1, kBlockN,
+//                   binfo.actual_seqlen_q, binfo.actual_seqlen_k, params.window_size_right);
+//        }
+        const int bound = is_VAR_causal
+                          ? (params.VAR_visible_kvlen[std::min(binfo.actual_seqlen_q, (m_block + 1) * kBlockM) - 1])    // @keyu: in VAR, binfo.actual_seqlen_k - binfo.actual_seqlen_q always be 0 due to self-attention
+                          : ((m_block + 1) * kBlockM + binfo.actual_seqlen_k - binfo.actual_seqlen_q + params.window_size_right);
+        n_block_max = std::min(n_block_max, cute::ceil_div(bound, kBlockN));
         // if (threadIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
         //     printf("m_block = %d, n_block_max = %d\n", m_block, n_block_max);
         // }
     }
     // We exit early and write 0 to gO and gLSE. This also covers the case where actual_seqlen_k == 0.
     // Otherwise we might read OOB elements from gK and gV.
-    if ((Is_causal || Is_local || !Is_even_MN) && n_block_max <= n_block_min) {
+    if ((Is_causal || Is_local || !Is_even_MN) && n_block_max <= n_block_min) {     // n_block_min == 0 if !Is_local, and n_block_max is some value by ceil_div so >1; so n_block_max <= n_block_min is always false if !Is_local and actual_seqlen_k > 0
         Tensor mO = make_tensor(make_gmem_ptr(reinterpret_cast<Element*>(params.o_ptr)
                                               + binfo.q_offset(params.o_batch_stride, params.o_row_stride, bidb)),
                                 make_shape(binfo.actual_seqlen_q, params.h, params.d),
@@ -272,15 +281,34 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
 
     // For performance reason, we separate out two kinds of iterations:
     // those that need masking on S, and those that don't.
-    // We need masking on S for the very last block when K and V has length not multiple of kBlockN. @keyu: mask out the paddings?
+    // We need masking on S for the very last block when K and V has length not multiple of kBlockN.
     // We also need masking on S if it's causal, for the last ceil_div(kBlockM, kBlockN) blocks.
     // We will have at least 1 "masking" iteration.
 
-    // If not even_N, then seqlen_k might end in the middle of a block. In that case we need to
+    // If Is_causal and not even_N, then seqlen_k might end in the middle of a block. In that case we need to
     // mask 2 blocks (e.g. when kBlockM == kBlockN), not just 1.
-    constexpr int n_masking_steps = (!Is_causal && !Is_local)
-        ? 1
-        : ((Is_even_MN && Is_causal) ? cute::ceil_div(kBlockM, kBlockN) : cute::ceil_div(kBlockM, kBlockN) + 1);
+
+    // If Is_causal and is_VAR_causal, the case would be a bit more complex.
+    //   - if this m_block's first and last row share a same kvlen, we need at most 1 masking.
+    //   - otherwise, we need to count how many n_blocks will involve masking.
+
+    // constexpr int n_masking_steps = (!Is_causal && !Is_local)
+    //     ? 1
+    //     : ((Is_even_MN && Is_causal) ? cute::ceil_div(kBlockM, kBlockN) : cute::ceil_div(kBlockM, kBlockN) + 1);
+
+    int VAR_masking_steps = 0;
+    if (Is_causal && is_VAR_causal) {
+        const int first_row_kvlen = params.VAR_visible_kvlen[m_block * kBlockM];
+        const int last_row_kvlen = params.VAR_visible_kvlen[std::min(binfo.actual_seqlen_q, (m_block + 1) * kBlockM) - 1];
+        VAR_masking_steps = last_row_kvlen == first_row_kvlen
+                            ? 1
+                            : (cute::ceil_div(last_row_kvlen, kBlockN) - /*floor_div*/(first_row_kvlen / kBlockN));
+    }
+    constexpr int not_VAR_masking_steps = (Is_even_MN && Is_causal) ? cute::ceil_div(kBlockM, kBlockN) : cute::ceil_div(kBlockM, kBlockN) + 1;
+    const int n_masking_steps = (!Is_causal && !Is_local)   // sad :( we cannot use constexpr anymore
+            ? 1
+            : ((Is_causal && is_VAR_causal) ? VAR_masking_steps : not_VAR_masking_steps);
+
     #pragma unroll
     for (int masking_step = 0; masking_step < n_masking_steps; ++masking_step, --n_block) {
         Tensor acc_s = partition_fragment_C(tiled_mma, Shape<Int<kBlockM>, Int<kBlockN>>{});  // (MMA=4, MMA_M, MMA_N)
@@ -306,7 +334,10 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
         // if (cute::thread0()) { print(acc_s); }
 
         mask.template apply_mask<Is_causal, Is_even_MN>(
-            acc_s, n_block * kBlockN, m_block * kBlockM + (tidx / 32) * 16 + (tidx % 32) / 4, kNWarps * 16
+            /*&tensor_=*/acc_s,
+            /*col_idx_offset_=*/n_block * kBlockN,
+            /*row_idx_offset=*/m_block * kBlockM + (tidx / 32) * 16 + (tidx % 32) / 4,
+            /*warp_row_stride=*/kNWarps * 16
         );
 
         flash::cp_async_wait<0>();
@@ -1049,20 +1080,7 @@ inline __device__ void compute_attn(const Params &params) {
     const int bidb = blockIdx.y;
     // The block index for the head.
     const int bidh = blockIdx.z;
-/*
-    // For test only: print content of VAR_visible_kvlen
-    // Remove this block in production code
-    if (params.VAR_visible_kvlen != nullptr) {
-        if (cute::thread0()) {
-            // should be a 1D vector of int32, shaped (seqlen_q,)
-            printf("[cute::thread0] VAR_visible_kvlen (%d,): [", params.seqlen_q);
-            for (int qi = 0; qi < params.seqlen_q; qi++) {
-                printf("%d, ", params.VAR_visible_kvlen[qi]);
-            }
-            printf("]\n");
-        }
-    }
-*/
+
     // We want the fwd and bwd to generate the same dropout pattern (RNG), without restricting
     // them to have the same number of threads or have to traverse the attention matrix
     // in the same order.

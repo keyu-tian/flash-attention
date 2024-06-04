@@ -46,7 +46,7 @@ __forceinline__ __device__ void apply_mask_local(Tensor<Engine, Layout> &tensor,
     static_assert(Layout::rank == 2, "Only support 2D Tensor");
     const int lane_id = threadIdx.x % 32;
     const int col_idx_offset = col_idx_offset_ + (lane_id % 4) * 2;
-    const bool VAR_causal = VAR_visible_kvlen != nullptr;
+    const bool is_VAR_causal = VAR_visible_kvlen != nullptr;
     #pragma unroll
     for (int mi = 0; mi < size<0, 1>(tensor); ++mi) {
         const int row_idx_base = row_idx_offset + mi * warp_row_stride;
@@ -57,7 +57,7 @@ __forceinline__ __device__ void apply_mask_local(Tensor<Engine, Layout> &tensor,
             const int col_idx_limit_right = std::min(
                 max_seqlen_k,
                 // todo: @keyu: can we safely remove std::min, directly use row_idx?
-                VAR_causal ? VAR_visible_kvlen[std::min(row_idx, max_seqlen_q)] : (row_idx + 1 + max_seqlen_k - max_seqlen_q + window_size_right)
+                is_VAR_causal ? VAR_visible_kvlen[std::min(row_idx, max_seqlen_q)] : (row_idx + 1 + max_seqlen_k - max_seqlen_q + window_size_right)
             );
             #pragma unroll
             for (int nj = 0; nj < size<1, 1>(tensor); ++nj) {
@@ -159,7 +159,7 @@ struct Mask {
             Tensor tensor = make_tensor(tensor_.data(), flash::convert_layout_acc_rowcol(tensor_.layout()));
             // Do we need both row and column indices, or just column incides?
             static constexpr bool Col_idx_only = !(Has_alibi && !Is_causal) && !Is_local && !Causal_mask;
-            const bool VAR_causal = VAR_visible_kvlen != nullptr;
+            const bool is_VAR_causal = VAR_visible_kvlen != nullptr;
             const int lane_id = threadIdx.x % 32;
             const int col_idx_offset = col_idx_offset_ + (lane_id % 4) * 2;
             if constexpr (Col_idx_only) {
@@ -194,7 +194,7 @@ struct Mask {
                         const int col_idx_limit_right = std::min(
                             max_seqlen_k,
                             // todo: @keyu: can we safely remove std::min, directly use row_idx?
-                            VAR_causal ? VAR_visible_kvlen[std::min(row_idx, max_seqlen_q)] : (row_idx + 1 + max_seqlen_k - max_seqlen_q + window_size_right)
+                            is_VAR_causal ? VAR_visible_kvlen[std::min(row_idx, max_seqlen_q)] : (row_idx + 1 + max_seqlen_k - max_seqlen_q + window_size_right)
                         );
                         #pragma unroll
                         for (int nj = 0; nj < size<1, 1>(tensor); ++nj) {

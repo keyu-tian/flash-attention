@@ -315,7 +315,11 @@ void set_params_alibi(Flash_fwd_params &params, c10::optional<at::Tensor> &alibi
 #endif
 }
 
-void set_params_VAR_visible_kvlen(Flash_fwd_params &params, c10::optional<at::Tensor> &VAR_visible_kvlen_, const int seqlen_q) {
+void set_params_VAR(
+        Flash_fwd_params &params,
+        c10::optional<at::Tensor> &VAR_visible_kvlen_,
+        c10::optional<at::Tensor> &VAR_invisible_qlen_,
+        const int seqlen_q, const int seqlen_kv) {
     if (VAR_visible_kvlen_.has_value()) {
         auto &VAR_visible_kvlen = VAR_visible_kvlen_.value();
         TORCH_CHECK(VAR_visible_kvlen.dtype() == torch::kInt32, "VAR_visible_kvlen must have dtype torch.int32");
@@ -326,8 +330,18 @@ void set_params_VAR_visible_kvlen(Flash_fwd_params &params, c10::optional<at::Te
         // split kernel is only used in mha_fwd_kvcache, so no need to check it here
         // set the ptr
         params.VAR_visible_kvlen = VAR_visible_kvlen.data_ptr<int>();
+
+        auto &VAR_invisible_qlen = VAR_invisible_qlen_.value();
+        TORCH_CHECK(VAR_invisible_qlen.dtype() == torch::kInt32, "VAR_invisible_qlen must have dtype torch.int32");
+        CHECK_DEVICE(VAR_invisible_qlen);
+        CHECK_CONTIGUOUS(VAR_invisible_qlen);
+        // check shape, should be a 1D veector, length eqaul to number of attention columns
+        TORCH_CHECK(VAR_invisible_qlen.numel() == (int64_t)seqlen_kv, "VAR_invisible_qlen must have length equal to seqlen_kv");
+        // split kernel is only used in mha_fwd_kvcache, so no need to check it here
+        // set the ptr
+        params.VAR_invisible_qlen = VAR_invisible_qlen.data_ptr<int>();
     } else {
-        params.VAR_visible_kvlen = nullptr;
+        params.VAR_visible_kvlen = params.VAR_invisible_qlen = nullptr;
     }
 }
 
@@ -345,6 +359,7 @@ mha_fwd(at::Tensor &q,         // batch_size x seqlen_q x num_heads x head_size
         int window_size_right,
         const bool return_softmax,
         c10::optional<at::Tensor> &VAR_visible_kvlen_, // 1D tensor, int32, seqlen_q
+        c10::optional<at::Tensor> &VAR_invisible_qlen_, // 1D tensor, int32, seqlen_q
         c10::optional<at::Generator> gen_) {
 
     auto dprops = at::cuda::getCurrentDeviceProperties();
@@ -491,7 +506,7 @@ mha_fwd(at::Tensor &q,         // batch_size x seqlen_q x num_heads x head_size
 
     set_params_alibi(params, alibi_slopes_, batch_size, num_heads);
     // similar to set_params_alibi
-    set_params_VAR_visible_kvlen(params, VAR_visible_kvlen_, seqlen_q);
+    set_params_VAR(params, VAR_visible_kvlen_, VAR_invisible_qlen_, seqlen_q, seqlen_k);
 
     if (seqlen_k > 0) {
         auto stream = at::cuda::getCurrentCUDAStream().stream();
@@ -792,6 +807,7 @@ mha_bwd(const at::Tensor &dout,  // batch_size x seqlen_q x num_heads, x head_si
         int window_size_right,
         const bool deterministic,
         c10::optional<at::Tensor> &VAR_visible_kvlen_, // 1D tensor, int32, seqlen_q
+        c10::optional<at::Tensor> &VAR_invisible_qlen_, // 1D tensor, int32, seqlen_q
         c10::optional<at::Generator> gen_,
         c10::optional<at::Tensor> &rng_state) {
 
@@ -979,7 +995,7 @@ mha_bwd(const at::Tensor &dout,  // batch_size x seqlen_q x num_heads, x head_si
 
     set_params_alibi(params, alibi_slopes_, batch_size, num_heads);
     // similar to set_params_alibi
-    set_params_VAR_visible_kvlen(params, VAR_visible_kvlen_, seqlen_q);
+    set_params_VAR(params, VAR_visible_kvlen_, VAR_invisible_qlen_, seqlen_q, seqlen_k);
 
     if (seqlen_q > 0) {
         launch(params, stream);
