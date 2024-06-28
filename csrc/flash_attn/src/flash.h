@@ -127,7 +127,7 @@ struct Flash_fwd_params : public Qkv_params {
     at::PhiloxCudaState philox_args;
 
     // Pointer to the RNG seed (idx 0) and offset (idx 1).
-    uint64_t * rng_state;
+    uint64_t * rng_state;   // this will be used only if dropout_p > 0.0
 
     bool is_bf16;
     bool is_causal;

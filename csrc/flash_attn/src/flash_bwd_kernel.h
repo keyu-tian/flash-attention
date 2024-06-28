@@ -445,9 +445,6 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
         cute::copy(smem_tiled_copy_KV, tdPsV, tdPrV_copy_view);
     }
 
-    flash::Dropout dropout(params.rng_state[0], params.rng_state[1], params.p_dropout_in_uint8_t,
-                           bidb, bidh, tidx, params.h);
-
     clear(acc_dv);
     clear(acc_dk);
 
@@ -534,6 +531,8 @@ inline __device__ void compute_dq_dk_dv_1colblock(const Params &params, const in
             // Need col to be multiples of 32, since we're doing dropout with block of 16 x 32
             static_assert(MMA_N_SdP % 2 == 0);
             int block_col_idx = n_block * (kBlockN / 32) + (warp_id / AtomLayoutMS) * (MMA_N_SdP / 2);
+            flash::Dropout dropout(params.rng_state[0], params.rng_state[1], params.p_dropout_in_uint8_t,
+                                   bidb, bidh, tidx, params.h);
             dropout.template apply_dropout</*encode_dropout_in_sign_bit=*/true>(
                 acc_s, block_row_idx, block_col_idx, AtomLayoutMS
             );
